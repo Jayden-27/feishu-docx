@@ -14,6 +14,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from feishu_docx.utils import encode_md_link_path
+
 try:
     from playwright.sync_api import Page
 except ImportError:  # pragma: no cover - 按需导入
@@ -292,7 +294,7 @@ class BrowserAssetDownloader:
         filename = self._unique_filename(self._sanitize_filename(str(payload["file_name"])))
         target_path = assets_dir / filename
         target_path.write_bytes(self._decode_base64(str(payload["base64"])))
-        return f"{assets_dir.name}/{filename}"
+        return encode_md_link_path(f"{assets_dir.name}/{filename}")
 
     def _collect_assets(self, block: dict[str, Any]) -> list[dict[str, Any]]:
         """递归收集资源块。"""

@@ -13,8 +13,21 @@
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
+from urllib.parse import quote
+
 from feishu_docx.utils.config import get_config_dir, get_cache_dir
 from feishu_docx.utils.progress import ProgressManager
 
-__all__ = ["get_config_dir", "get_cache_dir", "ProgressManager"]
+
+def encode_md_link_path(path: str) -> str:
+    """URL-encode each path segment for safe use in Markdown links.
+
+    Splits on '/' so directory separators stay literal while spaces,
+    Chinese characters, and other non-ASCII chars in filenames get
+    percent-encoded.
+    """
+    return "/".join(quote(seg, safe="") for seg in path.split("/"))
+
+
+__all__ = ["get_config_dir", "get_cache_dir", "ProgressManager", "encode_md_link_path"]
 

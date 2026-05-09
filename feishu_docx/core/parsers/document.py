@@ -21,6 +21,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
 from lark_oapi.api.docx.v1 import Block
+from feishu_docx.utils import encode_md_link_path
 from feishu_docx.utils.console import get_console
 
 from feishu_docx.core.sdk import FeishuSDK
@@ -159,7 +160,7 @@ class DocumentParser:
         pm.log(f"  [dim]渲染完成 ({total_blocks} blocks)[/dim]")
         pm.report("渲染完成", total_blocks, total_blocks)
 
-        return f"# {title}\n{body}"
+        return f"> document_token: `{self.document_id}`\n\n# {title}\n{body}"
 
     def _get_sub_blocks(self, block: Block) -> List[Block]:
         """获取 block 的子 Block 列表"""
@@ -241,7 +242,7 @@ class DocumentParser:
         if BlockType.HEADING1 <= bt <= BlockType.HEADING9:
             level = bt - 2
             payload = getattr(block, f"heading{level}", None)
-            return f"{'#' * level} {self._render_text_payload(payload)}"
+            return f"{'#' * level} {self._render_plain_text(payload)}"
 
         # 列表类
         if bt == BlockType.BULLET:
@@ -267,7 +268,12 @@ class DocumentParser:
             lang = "text"
             if block.code and block.code.style and block.code.style.language:
                 lang = CODE_STYLE_MAP.get(block.code.style.language, "text")
-            return f"```{lang}\n{self._render_text_payload(block.code)}\n```"
+            raw = "".join(
+                el.text_run.content
+                for el in (block.code.elements if block.code else [])
+                if el.text_run and el.text_run.content
+            )
+            return f"```{lang}\n{raw}\n```"
 
         if bt == BlockType.QUOTE:
             return f"> {self._render_text_payload(block.quote)}"
@@ -287,9 +293,9 @@ class DocumentParser:
                     return f"![image]({file_path_or_url})"
                 # 使用相对路径：资源目录名/文件名
                 if self.assets_dir:
-                    rel_path = f"{self.assets_dir.name}/{Path(file_path_or_url).name}"
+                    rel_path = encode_md_link_path(f"{self.assets_dir.name}/{Path(file_path_or_url).name}")
                     return f"![image]({rel_path})"
-                return f"![image]({file_path_or_url})"
+                return f"![image]({encode_md_link_path(file_path_or_url)})"
             else:
                 # 降级方案：使用临时下载 URL（适用于只读权限）
                 download_url = self.sdk.media.get_file_download_url(block.image.token, self.user_access_token)
@@ -323,10 +329,10 @@ class DocumentParser:
                 if "image_path" in board_data:
                     file_path = board_data["image_path"]
                     if self.assets_dir:
-                        rel_path = f"{self.assets_dir.name}/{Path(file_path).name}"
+                        rel_path = encode_md_link_path(f"{self.assets_dir.name}/{Path(file_path).name}")
                         content_parts.append(f"![whiteboard]({rel_path})")
                     else:
-                        content_parts.append(f"![whiteboard]({file_path})")
+                        content_parts.append(f"![whiteboard]({encode_md_link_path(file_path)})")
 
                 # 元数据部分
                 if "nodes" in board_data:
@@ -341,9 +347,9 @@ class DocumentParser:
                 if file_path:
                     # 使用相对路径
                     if self.assets_dir:
-                        rel_path = f"{self.assets_dir.name}/{Path(file_path).name}"
+                        rel_path = encode_md_link_path(f"{self.assets_dir.name}/{Path(file_path).name}")
                         return f"![whiteboard]({rel_path})"
-                    return f"![whiteboard]({file_path})"
+                    return f"![whiteboard]({encode_md_link_path(file_path)})"
                 # 降级：无法下载时返回占位符（画板没有临时URL方案）
                 return f"<!-- 画板 {whiteboard_id} 需要相应权限才能下载 -->"
 
@@ -408,7 +414,7 @@ class DocumentParser:
             elif view == "uml":
                 lang = "plantuml"
             else:
-                lang = "text"
+                lang = "mermaid"
             return f"```{lang}\n{widget_data}\n```"
 
         # 文件/附件 Block
@@ -426,7 +432,7 @@ class DocumentParser:
                 if file_path_or_url:
                     if file_path_or_url.startswith(("http://", "https://")):
                         return f"📎 [{file_name}]({file_path_or_url})"
-                    rel_path = f"{self.assets_dir.name}/{Path(file_path_or_url).name}"
+                    rel_path = encode_md_link_path(f"{self.assets_dir.name}/{Path(file_path_or_url).name}")
                     return f"📎 [{file_name}]({rel_path})"
 
             download_url = self.sdk.media.get_file_download_url(file_token, self.user_access_token)
@@ -449,23 +455,25 @@ class DocumentParser:
                 text = el.text_run.content
                 style = el.text_run.text_element_style
                 if style:
-                    if style.bold:
-                        text = f"**{text}** " if text else ""
-                    if style.italic:
-                        text = f"*{text}*"
-                    if style.strikethrough:
-                        text = f"~~{text}~~"
-                    if style.inline_code:
-                        text = f"`{text}`"
-                    if style.underline:
-                        text = f"<u>{text}</u>"
                     if style.link:
                         text = f"[{text}]({unquote(style.link.url)})"
+                    elif style.inline_code:
+                        text = f"`{text}`"
+                    else:
+                        if style.bold:
+                            text = f"**{text}**" if text else ""
+                        if style.italic:
+                            text = f"*{text}*"
+                        if style.underline:
+                            text = f"<u>{text}</u>"
+                    if style.strikethrough:
+                        text = f"~~{text}~~"
             elif el.mention_user:
                 user_name = self.sdk.contact.get_user_name(el.mention_user.user_id, self.user_access_token)
                 text = f"@{user_name}"
             elif el.mention_doc:
-                text = f"[{el.mention_doc.token}]"
+                doc_title = el.mention_doc.title or el.mention_doc.token
+                text = f"[{doc_title}]（`{el.mention_doc.token}`）"
             elif el.equation:
                 text = f"${el.equation.content}$"
             elif el.link_preview:
@@ -473,6 +481,16 @@ class DocumentParser:
 
             result.append(text)
         return "".join(result)
+
+    def _render_plain_text(self, payload) -> str:
+        """提取纯文本，不应用任何 Markdown 样式（用于标题等场景）"""
+        if not payload or not hasattr(payload, "elements"):
+            return ""
+        return "".join(
+            el.text_run.content
+            for el in payload.elements
+            if el.text_run and el.text_run.content
+        )
 
     def _render_table(self, table_block: Block) -> str:
         """渲染表格 Block"""
