@@ -20,12 +20,42 @@ from typing import Optional
 import typer
 from rich.panel import Panel
 
+from feishu_docx.auth.oauth import OAuth2Authenticator
 from feishu_docx.core.exporter import FeishuExporter
 from .common import console, get_credentials
 
 # ==============================================================================
 # export 命令
 # ==============================================================================
+
+_TOKEN_EXPIRY_HINTS = {"99991663", "99991400", "401", "403", "token", "expired", "expire", "过期", "unauthorized"}
+
+
+def _is_token_expired_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(hint in msg for hint in _TOKEN_EXPIRY_HINTS)
+
+
+def _do_export(exporter: FeishuExporter, url: str, stdout: bool, output: Path,
+               filename, table_format, sheet_value_mode, with_block_ids, export_board_metadata):
+    if stdout:
+        content = exporter.export_content(
+            url=url,
+            table_format=table_format,
+            sheet_value_mode=sheet_value_mode,
+            export_board_metadata=export_board_metadata,
+        )
+        print(content)
+        return None
+    return exporter.export(
+        url=url,
+        output_dir=output,
+        filename=filename,
+        table_format=table_format,
+        sheet_value_mode=sheet_value_mode,
+        with_block_ids=with_block_ids,
+        export_board_metadata=export_board_metadata,
+    )
 
 
 def export(
@@ -148,32 +178,37 @@ def export(
                 )
                 raise typer.Exit(1)
 
-        # 执行导出
-        if stdout:
-            # 直接输出内容到 stdout
-            content = exporter.export_content(
-                url=url,
-                table_format=table_format,  # type: ignore
-                sheet_value_mode=sheet_value_mode,  # type: ignore
-                export_board_metadata=export_board_metadata,
+        # 执行导出（token 过期时自动重新认证后重试一次）
+        try:
+            output_path = _do_export(
+                exporter, url, stdout, output, filename,
+                table_format, sheet_value_mode, with_block_ids, export_board_metadata,  # type: ignore
             )
-            print(content)
-        else:
-            # 保存到文件
-            output_path = exporter.export(
-                url=url,
-                output_dir=output,
-                filename=filename,
-                table_format=table_format,  # type: ignore
-                sheet_value_mode=sheet_value_mode,  # type: ignore
-                with_block_ids=with_block_ids,
-                export_board_metadata=export_board_metadata,
+        except Exception as exc:
+            if not _is_token_expired_error(exc):
+                raise
+            if token:
+                # 直接传入的 token 无法自动刷新，提示用户
+                console.print(f"[red]❌ Token 已过期，请重新运行 [cyan]feishu-docx auth[/cyan] 后再试[/red]")
+                raise typer.Exit(1)
+            console.print("[yellow]⚠ Token 已过期，正在重新认证...[/yellow]")
+            # 强制清除缓存的 token，让 authenticator 重走认证流程
+            exporter._access_token = None
+            if exporter._authenticator is not None:
+                if hasattr(exporter._authenticator, '_token_info'):
+                    exporter._authenticator._token_info = None
+            new_token = exporter.get_access_token()
+            console.print("[green]✓ 重新认证成功，正在重试导出...[/green]")
+            output_path = _do_export(
+                exporter, url, stdout, output, filename,
+                table_format, sheet_value_mode, with_block_ids, export_board_metadata,  # type: ignore
             )
+
+        if output_path:
             console.print(Panel(f"✅ 导出完成: [green]{output_path}[/green]", border_style="green"))
 
-    except ValueError as e:
-        console.print(f"[red]❌ 错误: {e}[/red]")
-        raise typer.Exit(1)
+    except (ValueError, typer.Exit):
+        raise
     except Exception as e:
         console.print(f"[red]❌ 导出失败: {e}[/red]")
         raise typer.Exit(1)
